@@ -72,20 +72,22 @@ func Open(path string, pool []string) (*Store, error) {
 	return s, nil
 }
 
-// assignedLinks returns the set of call links held by non-revoked keys.
-func (s *Store) assignedLinks() map[string]bool {
+// assignedLinks returns the set of call links held by keys still valid at
+// now. A revoked or expired key no longer holds its link, so the link is
+// free to reissue (the spec recycles calls on revoke and on expiry).
+func (s *Store) assignedLinks(now time.Time) map[string]bool {
 	used := map[string]bool{}
 	for _, r := range s.keys {
-		if r.Status != StatusRevoked {
+		if r.Valid(now) {
 			used[r.CallLink] = true
 		}
 	}
 	return used
 }
 
-// freeLink returns an unused pool link, or "" if none.
-func (s *Store) freeLink() string {
-	used := s.assignedLinks()
+// freeLink returns a pool link not held by any key valid at now, or "".
+func (s *Store) freeLink(now time.Time) string {
+	used := s.assignedLinks(now)
 	for _, link := range s.pool {
 		if !used[link] {
 			return link
@@ -98,7 +100,7 @@ func (s *Store) freeLink() string {
 func (s *Store) Issue(ttl time.Duration, now time.Time) (KeyRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	link := s.freeLink()
+	link := s.freeLink(now)
 	if link == "" {
 		return KeyRecord{}, ErrPoolExhausted
 	}

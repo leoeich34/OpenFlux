@@ -94,6 +94,23 @@ func TestRevokeFreesCallLinkForReuse(t *testing.T) {
 	}
 }
 
+func TestIssueReusesExpiredKeysLink(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"only-one"})
+	if _, err := s.Issue(time.Hour, now); err != nil {
+		t.Fatalf("first Issue: %v", err)
+	}
+	// Two hours later the first key has expired; its call link must be free
+	// to reissue even though the record is still present and not revoked.
+	r2, err := s.Issue(time.Hour, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("reissue after expiry: %v", err)
+	}
+	if r2.CallLink != "only-one" {
+		t.Errorf("expired key's link not reclaimed: %q", r2.CallLink)
+	}
+}
+
 func TestRevokeUnknownIsErrNotFound_AlreadyRevokedIsNoError(t *testing.T) {
 	now := time.Now()
 	s := newStore(t, []string{"call-a"})
