@@ -85,7 +85,10 @@ func TestAdminIssueReturnsDecodableKey(t *testing.T) {
 func TestAdminListOmitsSecret(t *testing.T) {
 	_, admin, _ := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
 	out := adminIssue(t, admin, 3600)
-	resp, _ := http.Get(admin.URL + "/admin/list")
+	resp, err := http.Get(admin.URL + "/admin/list")
+	if err != nil {
+		t.Fatalf("list GET: %v", err)
+	}
 	defer resp.Body.Close()
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
@@ -99,7 +102,10 @@ func TestAdminListOmitsSecret(t *testing.T) {
 func TestAdminRevokeUnknownIs404(t *testing.T) {
 	_, admin, _ := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
 	body, _ := json.Marshal(map[string]string{"id": "nope"})
-	resp, _ := http.Post(admin.URL+"/admin/revoke", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(admin.URL+"/admin/revoke", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("revoke POST: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -113,7 +119,10 @@ func TestExitWSGetsRevokeAfterAdminRevoke(t *testing.T) {
 	c := dialExit(t, exit, id)
 
 	body, _ := json.Marshal(map[string]string{"id": id})
-	resp, _ := http.Post(admin.URL+"/admin/revoke", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(admin.URL+"/admin/revoke", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("revoke POST: %v", err)
+	}
 	resp.Body.Close()
 
 	readRevoke(t, c, 3*time.Second)
