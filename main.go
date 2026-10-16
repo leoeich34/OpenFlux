@@ -291,6 +291,8 @@ func main() {
 	flag.StringVar(&maxUid, "maxUid", "", "MAX call user id. If u use MAX transport")
 	directDial := flag.String("direct-dial", "", "DirectTransport: exit address to dial (client). Requires --encryption-key-file")
 	directListen := flag.String("direct-listen", "", "DirectTransport: local address to listen on (exit). Requires --encryption-key-file")
+	licenseServer := flag.String("license-server", "", "Exit: access-control WebSocket, e.g. ws://host:port/exit/ws. Set together with --license-key-id.")
+	licenseKeyID := flag.String("license-key-id", "", "Exit: the access key id this node serves. Set together with --license-server.")
 	transportsFlag := flag.String("transports", "",
 		"Comma-separated list of transports with priorities, e.g. "+
 			"\"direct:100,yandex:50\". If empty, --transport is used as a single transport.")
@@ -1170,6 +1172,16 @@ DEPRECATED (removed in v2)
 		}
 		if printLink != nil {
 			printLink()
+		}
+		if enabled, err := licenseValidate(*licenseServer, *licenseKeyID); err != nil {
+			log.Fatalf("%v", err)
+		} else if enabled {
+			if _, err := startLicense(*licenseServer, *licenseKeyID, trans); err != nil {
+				// Fail-closed: if the exit cannot reach the control server at
+				// startup, it must not carry traffic.
+				log.Fatalf("Access control: cannot reach license server: %v", err)
+			}
+			log.Printf("Access control: enforcing key %s via %s", *licenseKeyID, *licenseServer)
 		}
 		runExit(trans, exitMode)
 	case roleClient:
