@@ -557,34 +557,61 @@ func (t *TelemostTransport) sendSDKCodecsInfo() error {
 	return t.writeWSMessage(websocket.TextMessage, data)
 }
 
+// slotDefault{W,H} is the default rendered size requested for each subscriber
+// slot. It is full-HD so the SFU forwards the sharing stream at its full
+// ~2 Mbps cap rather than the ~300 Kbps floor a thumbnail-sized slot gets.
+// Overridable with TELEMOST_SLOT_W/H; TELEMOST_SLOT_SMALL=1 restores the old
+// thumbnail grid.
+const (
+	slotDefaultW = 1920
+	slotDefaultH = 1080
+)
+
 func (t *TelemostTransport) sendSetSlots() error {
 	key := t.slotKey.Add(1)
 	// The slot dimensions tell the SFU how large the subscriber will render each
-	// stream. The SFU sizes the bitrate it forwards to the slot: small
-	// (thumbnail) dimensions get a low-bitrate layer, so the default 608x342
-	// slots cap the forwarded sharing stream at a few hundred Kbps regardless of
-	// how much the publisher sends. TELEMOST_SLOT_W/H request a larger slot so
-	// the SFU forwards the full sharing bitrate (up to its ~2 Mbps cap).
-	slots := []map[string]interface{}{
-		{"width": 608, "height": 342}, {"width": 608, "height": 342},
-		{"width": 416, "height": 234}, {"width": 416, "height": 234},
-		{"width": 400, "height": 225}, {"width": 400, "height": 225},
-		{"width": 288, "height": 162}, {"width": 288, "height": 162},
-		{"width": 272, "height": 153}, {"width": 272, "height": 153},
-		{"width": 272, "height": 153}, {"width": 272, "height": 153},
-	}
+	// stream, and the SFU sizes the bitrate it forwards to that slot: a small
+	// (thumbnail) slot gets a low-bitrate layer, a large one gets the full
+	// sharing bitrate up to its ~2 Mbps cap. The old default - a browser-like
+	// grid of 608x342 thumbnails - pinned the forwarded sharing stream to the
+	// sharing config's *minBitrate* (~300 Kbps) no matter how much the
+	// publisher sent, which was the dominant throughput cap on the whole
+	// tunnel: measured per-lane, a thumbnail slot sees ~75-96% RTP sequence
+	// gaps (the SFU simply never forwards most of what we publish), a full-size
+	// slot ~22-37%.
+	//
+	// Since every slot here carries a tunnel lane's sharing stream (never a real
+	// participant's camera), the default is now the full sharing resolution on
+	// every slot. TELEMOST_SLOT_W/H still override the dimensions;
+	// TELEMOST_SLOT_SMALL=1 restores the old thumbnail grid for callers who want
+	// to minimize how unlike a real client the slot request looks.
+	w, h := slotDefaultW, slotDefaultH
 	if ws := os.Getenv("TELEMOST_SLOT_W"); ws != "" {
-		hs := os.Getenv("TELEMOST_SLOT_H")
-		if w, err := strconv.Atoi(ws); err == nil && w > 0 {
-			h, _ := strconv.Atoi(hs)
-			if h <= 0 {
+		if v, err := strconv.Atoi(ws); err == nil && v > 0 {
+			w = v
+			if hv, err := strconv.Atoi(os.Getenv("TELEMOST_SLOT_H")); err == nil && hv > 0 {
+				h = hv
+			} else {
 				h = w * 9 / 16
 			}
-			for i := range slots {
-				slots[i] = map[string]interface{}{"width": w, "height": h}
-			}
-			utils.Debugf("[Telemost] setSlots dimensions overridden to %dx%d [%s]", w, h, roleStr(t.isExitNode))
 		}
+	}
+	var slots []map[string]interface{}
+	if os.Getenv("TELEMOST_SLOT_SMALL") == "1" {
+		slots = []map[string]interface{}{
+			{"width": 608, "height": 342}, {"width": 608, "height": 342},
+			{"width": 416, "height": 234}, {"width": 416, "height": 234},
+			{"width": 400, "height": 225}, {"width": 400, "height": 225},
+			{"width": 288, "height": 162}, {"width": 288, "height": 162},
+			{"width": 272, "height": 153}, {"width": 272, "height": 153},
+			{"width": 272, "height": 153}, {"width": 272, "height": 153},
+		}
+	} else {
+		slots = make([]map[string]interface{}, 12)
+		for i := range slots {
+			slots[i] = map[string]interface{}{"width": w, "height": h}
+		}
+		utils.Debugf("[Telemost] setSlots dimensions %dx%d (full-bitrate sharing slot) [%s]", w, h, roleStr(t.isExitNode))
 	}
 	if n := envIntDefault("TELEMOST_SLOT_COUNT", 0); n > 0 && n < len(slots) {
 		slots = slots[:n]

@@ -1,0 +1,35 @@
+services:
+  client:
+    environment:
+      # Toggle for before/after benchmarking: TELEMOST_SLOT_SMALL=1 restores the
+      # old 608x342 thumbnail slot (the ~300 Kbps cap); unset uses the new
+      # full-HD default (lets the SFU forward up to its ~2 Mbps sharing cap).
+      TELEMOST_SLOT_SMALL: ${TELEMOST_SLOT_SMALL:-}
+      TELEMOST_STRIPES: ${TELEMOST_STRIPES:-}
+      TELEMOST_STRIPES_MAX: ${TELEMOST_STRIPES_MAX:-}
+      STRIPE_PACE_FIXED: ${STRIPE_PACE_FIXED:-}
+    entrypoint: ["/usr/local/bin/openflux"]
+    command:
+      - --role=client
+      - --inbound=socks5
+      - --transport=telemost
+      - --url=${TELEMOST_URL:?Set TELEMOST_URL in .env}
+      - --socks5=:1080
+      - --debug=2
+      - --encryption-key-file=/run/secrets/channel.key
+    volumes:
+      - ./channel.key:/run/secrets/channel.key:ro
+  exit-node:
+    environment:
+      TELEMOST_URL: ${TELEMOST_URL:?Set TELEMOST_URL in .env}
+      TELEMOST_SLOT_SMALL: ${TELEMOST_SLOT_SMALL:-}
+      TELEMOST_STRIPES: ${TELEMOST_STRIPES:-}
+      TELEMOST_STRIPES_MAX: ${TELEMOST_STRIPES_MAX:-}
+      STRIPE_PACE_FIXED: ${STRIPE_PACE_FIXED:-}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
+        exec /usr/local/bin/openflux --role=exit --mode=l4 --transport=telemost --debug=2 --url="$$TELEMOST_URL" --encryption-key-file=/run/secrets/channel.key
+    volumes:
+      - ./channel.key:/run/secrets/channel.key:ro
