@@ -136,3 +136,39 @@ func TestColdIssueNotReadyRollsBack(t *testing.T) {
 		t.Fatalf("re-issue after rollback: %v", err)
 	}
 }
+
+func TestAdoptRunningRepopulatesHandlesAndWarm(t *testing.T) {
+	now := time.Now()
+	p, f, st := newPool(t, []string{"a", "b", "c"}, 1)
+	// Simulate a prior run: one warm (unclaimed) key+exit, one sold (claimed).
+	warm, _ := st.Issue(warmTTL, now)
+	f.Launch(ExitSpec{KeyID: warm.ID, CallLink: warm.CallLink})
+	sold, _ := st.Issue(time.Hour, now)
+	_ = st.Claim(sold.ID, time.Hour, now) // mark claimed (sold)
+	f.Launch(ExitSpec{KeyID: sold.ID, CallLink: sold.CallLink})
+
+	// A fresh Pool (as after restart) adopts them.
+	p2 := NewPool(st, f, "ws://hub/exit/ws", 1)
+	p2.AdoptRunning(now)
+
+	// EnsureWarm must NOT launch a duplicate warm exit (target already met).
+	before := len(f.Launched())
+	p2.EnsureWarm()
+	if len(f.Launched()) != before {
+		t.Errorf("EnsureWarm launched a duplicate after adoption")
+	}
+	// Release of the sold key stops its adopted container.
+	if err := p2.Release(sold.ID); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	stoppedSold := false
+	for _, h := range f.Stopped() {
+		if h.KeyID == sold.ID {
+			stoppedSold = true
+		}
+	}
+	if !stoppedSold {
+		t.Errorf("Release did not stop the adopted sold exit")
+	}
+	_ = p
+}

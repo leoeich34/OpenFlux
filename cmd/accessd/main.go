@@ -58,6 +58,7 @@ func main() {
 		} else if len(stopped) > 0 {
 			log.Printf("accessd: reconcile stopped %d orphaned exit(s)", len(stopped))
 		}
+		p.AdoptRunning(time.Now()) // re-manage exits that survived a restart
 		go maintainLoop(st, launcher, p)
 		log.Printf("accessd: pool enabled (image %s, warm %d)", *dockerImage, *warm)
 	}

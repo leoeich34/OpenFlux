@@ -40,6 +40,10 @@ type KeyRecord struct {
 	// NextCallLink is a pool link reserved for an in-progress call migration;
 	// it is held (not reissued to anyone else) until the migration commits.
 	NextCallLink string `json:"nextCallLink,omitempty"`
+	// Claimed is true once a buyer has taken this key (a cold sold issue or a
+	// warm key handed out). It lets the pool tell warm (unclaimed) exits from
+	// sold ones when adopting running containers after a restart.
+	Claimed bool `json:"claimed,omitempty"`
 }
 
 // Valid reports whether the key may carry traffic at time now.
@@ -164,6 +168,21 @@ func (s *Store) Claim(id string, ttl time.Duration, now time.Time) error {
 	r.Status = StatusActive
 	r.IssuedAt = now
 	r.ExpiresAt = now.Add(ttl)
+	r.Claimed = true
+	s.keys[id] = r
+	return s.persist()
+}
+
+// MarkClaimed records that a buyer has taken the key (used for a cold sold
+// issue, where the key was not pre-issued warm).
+func (s *Store) MarkClaimed(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Claimed = true
 	s.keys[id] = r
 	return s.persist()
 }

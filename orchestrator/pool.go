@@ -115,7 +115,32 @@ func (p *Pool) Issue(ttl time.Duration) (access.KeyRecord, string, error) {
 		_ = p.Release(rec.ID)
 		return access.KeyRecord{}, "", ErrNotReady
 	}
+	_ = p.store.MarkClaimed(rec.ID) // a cold sold key, not a warm one
 	return rec, key, nil
+}
+
+// AdoptRunning rebuilds the pool's view from the launcher's running exits
+// after a restart: valid keys' exits become managed handles, and valid
+// unclaimed (warm) ones rejoin the warm set, so EnsureWarm does not launch
+// duplicates and Release can stop adopted exits. Invalid ones are left for
+// Reconcile to stop.
+func (p *Pool) AdoptRunning(now time.Time) {
+	handles, err := p.launcher.List()
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, h := range handles {
+		rec, ok := p.store.Get(h.KeyID)
+		if !ok || !rec.Valid(now) {
+			continue
+		}
+		p.handles[h.KeyID] = h
+		if !rec.Claimed {
+			p.warmKeys = append(p.warmKeys, h.KeyID)
+		}
+	}
 }
 
 // waitReady polls ready(id) until it holds or timeout elapses.
