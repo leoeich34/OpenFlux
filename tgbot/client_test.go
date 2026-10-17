@@ -99,3 +99,28 @@ func TestFakeClientQueuesAndRecords(t *testing.T) {
 		t.Errorf("Sent = %+v", got)
 	}
 }
+
+func TestGetUpdatesErrorRedactsToken(t *testing.T) {
+	// Point at a closed port so the GET fails at the transport layer; the
+	// returned error must not contain the token (it is in the URL path).
+	c := NewHTTPClient("SECRET-TOKEN-123", WithBaseURL("http://127.0.0.1:1"))
+	_, err := c.GetUpdates(0, 0)
+	if err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN-123") {
+		t.Errorf("token leaked into error: %v", err)
+	}
+}
+
+func TestGetUpdatesNon200IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+	}))
+	defer srv.Close()
+	c := NewHTTPClient("TOK", WithBaseURL(srv.URL))
+	if _, err := c.GetUpdates(0, 0); err == nil {
+		t.Error("401 getUpdates should return an error, not an empty slice")
+	}
+}
