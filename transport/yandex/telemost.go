@@ -175,6 +175,13 @@ type TelemostTransport struct {
 	frameMu    sync.Mutex
 	frameQueue [][]byte
 
+	// lastPublishData is the UnixNano of the last time real tunnel data was
+	// queued; pubWake wakes the idle publisher the instant new data arrives so
+	// it leaves the idle filler rate without waiting out the slow tick. See
+	// keepaliveInterval and runPublisherKeepalive.
+	lastPublishData atomic.Int64
+	pubWake         chan struct{}
+
 	// frameSource, when set (StripedTransport), is asked for frames on every
 	// tick after frameQueue: what goes out is decided at the moment it goes.
 	frameSource atomic.Pointer[func(max int) [][]byte]
@@ -263,6 +270,7 @@ func NewTelemostTransport(cookies, conferenceURL string, isExitNode bool, config
 		shareCodecMime:   parseShareCodec(os.Getenv("TELEMOST_CODEC")),
 		shareCarrier:     parseShareCarrier(os.Getenv("TELEMOST_CARRIER")),
 		writeQueue:       make(chan []byte, config.MaxQueueSize),
+		pubWake:          make(chan struct{}, 1),
 		clientInstanceID: uuid.New().String(),
 		idempotencyKey:   uuid.New().String(),
 		batchSize:        1,
@@ -1677,6 +1685,31 @@ func (t *TelemostTransport) handlePublisherAnswer(ans map[string]interface{}) {
 // ceiling. 120fps cuts the per-hop wait to under 9ms.
 var publishFPS = envIntDefault("TELEMOST_FPS", 120)
 
+// idlePublishFPS is the filler rate used when no tunnel data has flowed for
+// activeLingerMs. The publisher must keep the stream alive or the SFU drops
+// it, but at 120fps that filler is ~0.25 Mbit/s per lane pair - ~114 MB/hour
+// doing nothing. Dropping to a few fps while idle cuts that ~40x; the rate
+// jumps back to publishFPS the instant real data arrives (the enqueue path
+// wakes the publisher), so active throughput is unaffected. 0 disables the
+// throttle (always publishFPS). TELEMOST_IDLE_FPS / TELEMOST_ACTIVE_LINGER_MS.
+var idlePublishFPS = envIntDefault("TELEMOST_IDLE_FPS", 3)
+
+var activeLingerMs = envIntDefault("TELEMOST_ACTIVE_LINGER_MS", 2000)
+
+// keepaliveInterval returns the publisher tick interval given how long it has
+// been since tunnel data last flowed: the full-rate interval while recently
+// active (or when the idle throttle is disabled), the idle interval once quiet.
+func keepaliveInterval(idleFor time.Duration) time.Duration {
+	fast := time.Second / time.Duration(publishFPS)
+	if idlePublishFPS <= 0 {
+		return fast
+	}
+	if idleFor < time.Duration(activeLingerMs)*time.Millisecond {
+		return fast
+	}
+	return time.Second / time.Duration(idlePublishFPS)
+}
+
 // rtpTimestampStep is how much the RTP timestamp advances per frame, at the
 // standard 90kHz video clock rate. It has to track publishFPS: advancing it
 // by a step sized for a different rate would make the stream's timestamps
@@ -1732,10 +1765,6 @@ func (t *TelemostTransport) runPublisherKeepalive() {
 			utils.Debugf("[Telemost] sendH264ParameterSets: %v [%s]", err, roleStr(t.isExitNode))
 		}
 	}
-	frameInterval := time.Second / time.Duration(publishFPS)
-	ticker := time.NewTicker(frameInterval)
-	defer ticker.Stop()
-
 	// The exit emits the self-identifying filler so the client can tell the
 	// exit's stream apart from its own self-view echo.
 	filler := keepalivePayload
@@ -1743,8 +1772,22 @@ func (t *TelemostTransport) runPublisherKeepalive() {
 		filler = probeKeepalivePayload
 	}
 	sent := 0
-	for range ticker.C {
-		if !t.IsRunning() || !t.trackReady.Load() {
+	for t.IsRunning() {
+		// The tick runs at the full publish rate while tunnel data is flowing
+		// and drops to the idle filler rate once quiet; a newly queued frame
+		// wakes us immediately so active throughput never waits out a slow
+		// idle tick. frameInterval is reused below to pace the tick's frames.
+		frameInterval := keepaliveInterval(time.Since(time.Unix(0, t.lastPublishData.Load())))
+		timer := time.NewTimer(frameInterval)
+		select {
+		case <-t.Done():
+			timer.Stop()
+			return
+		case <-t.pubWake:
+			timer.Stop()
+		case <-timer.C:
+		}
+		if !t.trackReady.Load() {
 			continue
 		}
 		frames := t.popFrames()
@@ -1757,6 +1800,17 @@ func (t *TelemostTransport) runPublisherKeepalive() {
 				}
 				frames = append(frames, frags...)
 			}
+		}
+		// Stay at the full rate only while the publisher is backlogged - the
+		// tick filled to maxFramesPerTick, or the direct queue still holds
+		// more - not on any activity. A thin trickle (a frame or two per tick)
+		// never saturates a tick, so it is carried at the idle rate instead of
+		// pinning 120fps: the idle rate's capacity (idleFPS * maxFramesPerTick
+		// * ~1.3KB) covers a small stream. Saturation is also the right signal
+		// for the striped pull path, whose backlog is not otherwise visible
+		// here (a full pull means more is waiting).
+		if len(frames) >= maxFramesPerTick || t.queuedFrames() > 0 {
+			t.lastPublishData.Store(time.Now().UnixNano())
 		}
 		if len(frames) == 0 {
 			frames = [][]byte{filler(sent)}
@@ -2708,6 +2762,14 @@ func (t *TelemostTransport) enqueueFrame(wire []byte) {
 	}
 	t.frameQueue = append(t.frameQueue, frags...)
 	t.frameMu.Unlock()
+
+	// Real tunnel data: mark activity and wake the publisher so it leaves the
+	// idle filler rate immediately rather than after a slow idle tick.
+	t.lastPublishData.Store(time.Now().UnixNano())
+	select {
+	case t.pubWake <- struct{}{}:
+	default:
+	}
 }
 
 // popFrames takes up to maxFramesPerTick buffered frames, oldest first.
