@@ -1801,6 +1801,14 @@ func (t *TelemostTransport) runPublisherKeepalive() {
 				frames = append(frames, frags...)
 			}
 		}
+		// Real frames this tick (from either the direct queue or the striped
+		// pull) count as activity, so the next tick stays at the full rate.
+		// enqueueFrame alone misses the striped pull path, which is the whole
+		// data path in the default mode - without this a lane would stay at
+		// the idle rate under load.
+		if len(frames) > 0 {
+			t.lastPublishData.Store(time.Now().UnixNano())
+		}
 		if len(frames) == 0 {
 			frames = [][]byte{filler(sent)}
 		}
