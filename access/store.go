@@ -37,6 +37,13 @@ type KeyRecord struct {
 	Status    Status    `json:"status"`
 	IssuedAt  time.Time `json:"issuedAt"`
 	ExpiresAt time.Time `json:"expiresAt"`
+	// NextCallLink is a pool link reserved for an in-progress call migration;
+	// it is held (not reissued to anyone else) until the migration commits.
+	NextCallLink string `json:"nextCallLink,omitempty"`
+	// Claimed is true once a buyer has taken this key (a cold sold issue or a
+	// warm key handed out). It lets the pool tell warm (unclaimed) exits from
+	// sold ones when adopting running containers after a restart.
+	Claimed bool `json:"claimed,omitempty"`
 }
 
 // Valid reports whether the key may carry traffic at time now.
@@ -80,6 +87,9 @@ func (s *Store) assignedLinks(now time.Time) map[string]bool {
 	for _, r := range s.keys {
 		if r.Valid(now) {
 			used[r.CallLink] = true
+			if r.NextCallLink != "" {
+				used[r.NextCallLink] = true
+			}
 		}
 	}
 	return used
@@ -143,6 +153,79 @@ func (s *Store) Revoke(id string) error {
 	r.Status = StatusRevoked
 	s.keys[id] = r
 	return s.persist()
+}
+
+// Claim re-arms a pre-issued (warm) key for a buyer: it sets the key active
+// and its expiry to now+ttl. Used when the pool hands out a warm exit whose
+// key was generated ahead of time. ErrNotFound for an unknown id.
+func (s *Store) Claim(id string, ttl time.Duration, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Status = StatusActive
+	r.IssuedAt = now
+	r.ExpiresAt = now.Add(ttl)
+	r.Claimed = true
+	s.keys[id] = r
+	return s.persist()
+}
+
+// MarkClaimed records that a buyer has taken the key (used for a cold sold
+// issue, where the key was not pre-issued warm).
+func (s *Store) MarkClaimed(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Claimed = true
+	s.keys[id] = r
+	return s.persist()
+}
+
+// ReserveNextCall reserves a free pool link as the key's migration target and
+// returns it. The link is held (counted as assigned) until CommitNextCall or
+// the key is released. ErrNotFound for an unknown id, ErrPoolExhausted when no
+// link is free.
+func (s *Store) ReserveNextCall(id string, now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return "", ErrNotFound
+	}
+	link := s.freeLink(now)
+	if link == "" {
+		return "", ErrPoolExhausted
+	}
+	r.NextCallLink = link
+	s.keys[id] = r
+	if err := s.persist(); err != nil {
+		return "", err
+	}
+	return link, nil
+}
+
+// CommitNextCall promotes a reserved migration target to the key's current
+// call link, freeing the old one. A no-op (nil) when nothing is reserved.
+func (s *Store) CommitNextCall(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if r.NextCallLink != "" {
+		r.CallLink = r.NextCallLink
+		r.NextCallLink = ""
+		s.keys[id] = r
+		return s.persist()
+	}
+	return nil
 }
 
 // Extend moves a key's expiry out by d.

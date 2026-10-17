@@ -482,6 +482,31 @@ func (m *Manager) SetControlCallback(cb func(sub control.Subtype, payload []byte
 	m.mu.Unlock()
 }
 
+// StartTransport brings up a transport locally and tells the peer to do the
+// same (SubtypeTransportStart), so both ends of the session gain it. Used to
+// migrate an exit's call in-session: the new call carries traffic before the
+// old one is stopped, so established flows do not drop.
+func (m *Manager) StartTransport(cfg *control.TransportConfig) error {
+	if err := m.startTransport(cfg); err != nil {
+		return err
+	}
+	payload, err := cfg.Encode()
+	if err != nil {
+		return err
+	}
+	return m.SendControl(control.SubtypeTransportStart, payload)
+}
+
+// StopTransport tells the peer to drop the named transport and removes it
+// locally.
+func (m *Manager) StopTransport(name string) error {
+	cfg := &control.TransportConfig{Name: name}
+	if payload, err := cfg.Encode(); err == nil {
+		_ = m.SendControl(control.SubtypeTransportStop, payload)
+	}
+	return m.Remove(name)
+}
+
 // startTransport builds a transport via the Factory, registers it in the
 // Session, and brings it up. Used by SubtypeTransportStart.
 //

@@ -172,3 +172,72 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Errorf("persisted record mismatch")
 	}
 }
+
+func TestClaimResetsExpiryAndReactivates(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"call-a"})
+	r, _ := s.Issue(time.Minute, now)
+	// Claim it later with a fresh TTL: expiry moves to claim-time + ttl.
+	if err := s.Claim(r.ID, time.Hour, now.Add(30*time.Minute)); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	got, _ := s.Get(r.ID)
+	if !got.Valid(now.Add(89 * time.Minute)) {
+		t.Errorf("claimed key should be valid at claim+60m")
+	}
+	if err := s.Claim("nope", time.Hour, now); err != ErrNotFound {
+		t.Errorf("Claim unknown: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestReserveNextCallHoldsLink(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"a", "b"})
+	r, _ := s.Issue(time.Hour, now) // takes one link
+	next, err := s.ReserveNextCall(r.ID, now)
+	if err != nil {
+		t.Fatalf("ReserveNextCall: %v", err)
+	}
+	if next == r.CallLink {
+		t.Errorf("reserved the same link it already holds: %q", next)
+	}
+	// Both links are now held: a new Issue finds none free.
+	if _, err := s.Issue(time.Hour, now); err != ErrPoolExhausted {
+		t.Errorf("reserved next link not held: Issue err = %v", err)
+	}
+}
+
+func TestReserveNextCallExhausted(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"only-one"})
+	r, _ := s.Issue(time.Hour, now)
+	if _, err := s.ReserveNextCall(r.ID, now); err != ErrPoolExhausted {
+		t.Errorf("want ErrPoolExhausted, got %v", err)
+	}
+	if _, err := s.ReserveNextCall("nope", now); err != ErrNotFound {
+		t.Errorf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestCommitNextCallPromotesAndFreesOld(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"a", "b"})
+	r, _ := s.Issue(time.Hour, now)
+	old := r.CallLink
+	next, _ := s.ReserveNextCall(r.ID, now)
+	if err := s.CommitNextCall(r.ID); err != nil {
+		t.Fatalf("CommitNextCall: %v", err)
+	}
+	got, _ := s.Get(r.ID)
+	if got.CallLink != next {
+		t.Errorf("CallLink = %q, want promoted %q", got.CallLink, next)
+	}
+	// old link is now free for a new issue
+	r2, err := s.Issue(time.Hour, now)
+	if err != nil {
+		t.Fatalf("Issue after commit: %v", err)
+	}
+	if r2.CallLink != old {
+		t.Errorf("old link not freed: got %q, want %q", r2.CallLink, old)
+	}
+}

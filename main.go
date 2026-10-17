@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/p1neappleXpress/OpenFlux/netbind"
+	"github.com/p1neappleXpress/OpenFlux/orchestrator"
 	"github.com/p1neappleXpress/OpenFlux/socks5"
 	"github.com/p1neappleXpress/OpenFlux/streamproxy"
 	"github.com/p1neappleXpress/OpenFlux/transport"
@@ -293,6 +294,7 @@ func main() {
 	directListen := flag.String("direct-listen", "", "DirectTransport: local address to listen on (exit). Requires --encryption-key-file")
 	licenseServer := flag.String("license-server", "", "Exit: access-control WebSocket, e.g. ws://host:port/exit/ws. Set together with --license-key-id.")
 	licenseKeyID := flag.String("license-key-id", "", "Exit: the access key id this node serves. Set together with --license-server.")
+	migrateCalls := flag.Bool("migrate", false, "Exit: migrate to a fresh pool call in-session when the current call stalls (needs a Session and --license-server).")
 	transportsFlag := flag.String("transports", "",
 		"Comma-separated list of transports with priorities, e.g. "+
 			"\"direct:100,yandex:50\". If empty, --transport is used as a single transport.")
@@ -1182,6 +1184,13 @@ DEPRECATED (removed in v2)
 				log.Fatalf("Access control: cannot reach license server: %v", err)
 			}
 			log.Printf("Access control: enforcing key %s via %s", *licenseKeyID, *licenseServer)
+			if *migrateCalls && managerInst != nil && len(specs) > 0 {
+				deps := orchestrator.NewManagerMigrateDeps(*licenseKeyID, string(secret), managerInst, *licenseServer)
+				ctrl := orchestrator.NewMigrationController(*licenseKeyID, deps, time.Now())
+				ctrl.SetCurrentName(specs[0].Name)
+				go orchestrator.RunMigrationLoop(ctrl, 5*time.Second, make(chan struct{}))
+				log.Printf("Access control: in-session call migration enabled")
+			}
 		}
 		runExit(trans, exitMode)
 	case roleClient:
