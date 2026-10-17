@@ -172,3 +172,20 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Errorf("persisted record mismatch")
 	}
 }
+
+func TestClaimResetsExpiryAndReactivates(t *testing.T) {
+	now := time.Now()
+	s := newStore(t, []string{"call-a"})
+	r, _ := s.Issue(time.Minute, now)
+	// Claim it later with a fresh TTL: expiry moves to claim-time + ttl.
+	if err := s.Claim(r.ID, time.Hour, now.Add(30*time.Minute)); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	got, _ := s.Get(r.ID)
+	if !got.Valid(now.Add(89 * time.Minute)) {
+		t.Errorf("claimed key should be valid at claim+60m")
+	}
+	if err := s.Claim("nope", time.Hour, now); err != ErrNotFound {
+		t.Errorf("Claim unknown: want ErrNotFound, got %v", err)
+	}
+}

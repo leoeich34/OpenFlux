@@ -145,6 +145,23 @@ func (s *Store) Revoke(id string) error {
 	return s.persist()
 }
 
+// Claim re-arms a pre-issued (warm) key for a buyer: it sets the key active
+// and its expiry to now+ttl. Used when the pool hands out a warm exit whose
+// key was generated ahead of time. ErrNotFound for an unknown id.
+func (s *Store) Claim(id string, ttl time.Duration, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Status = StatusActive
+	r.IssuedAt = now
+	r.ExpiresAt = now.Add(ttl)
+	s.keys[id] = r
+	return s.persist()
+}
+
 // Extend moves a key's expiry out by d.
 func (s *Store) Extend(id string, d time.Duration) error {
 	s.mu.Lock()
