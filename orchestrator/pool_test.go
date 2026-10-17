@@ -104,3 +104,35 @@ func TestIssueClaimsWarmExitWithoutNewLaunch(t *testing.T) {
 		t.Errorf("claimed key not valid")
 	}
 }
+
+func TestColdIssueWaitsForReady(t *testing.T) {
+	p, _, _ := newPool(t, []string{"a"}, 0)
+	var calls int
+	p.SetReady(func(string) bool { calls++; return calls >= 3 }, time.Second)
+	rec, _, err := p.Issue(time.Hour)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if calls < 3 {
+		t.Errorf("Issue returned before ready (calls=%d)", calls)
+	}
+	if !rec.Valid(time.Now()) {
+		t.Errorf("issued key invalid")
+	}
+}
+
+func TestColdIssueNotReadyRollsBack(t *testing.T) {
+	p, f, _ := newPool(t, []string{"only-one"}, 0)
+	p.SetReady(func(string) bool { return false }, 150*time.Millisecond)
+	if _, _, err := p.Issue(time.Hour); err != ErrNotReady {
+		t.Fatalf("want ErrNotReady, got %v", err)
+	}
+	if len(f.Stopped()) != 1 {
+		t.Errorf("not-ready exit was not stopped")
+	}
+	// link freed → a later issue (ready) succeeds
+	p.SetReady(nil, 0)
+	if _, _, err := p.Issue(time.Hour); err != nil {
+		t.Fatalf("re-issue after rollback: %v", err)
+	}
+}

@@ -1,11 +1,19 @@
 package orchestrator
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/p1neappleXpress/OpenFlux/access"
 )
+
+// ErrNotReady is returned by Issue when a cold-launched exit does not join
+// its call within the readiness timeout; the key is rolled back.
+var ErrNotReady = errors.New("orchestrator: exit did not become ready in time")
+
+// readyPoll is how often the cold path re-checks readiness.
+const readyPoll = 100 * time.Millisecond
 
 // warmTTL is how long a pre-issued warm key stays valid before a buyer
 // claims it. Long enough that warm exits are not reaped before use; a claim
@@ -24,6 +32,19 @@ type Pool struct {
 	mu       sync.Mutex
 	handles  map[string]ExitHandle // keyID -> running exit
 	warmKeys []string              // issued-but-unclaimed key ids
+
+	ready        func(keyID string) bool // nil = skip the readiness gate
+	readyTimeout time.Duration
+}
+
+// SetReady installs the readiness gate for cold launches: Issue waits up to
+// timeout for ready(keyID) to hold (the exit joined its call) before handing
+// out the key, and rolls back with ErrNotReady otherwise. Warm exits bypass
+// it, being joined ahead of time.
+func (p *Pool) SetReady(ready func(keyID string) bool, timeout time.Duration) {
+	p.mu.Lock()
+	p.ready, p.readyTimeout = ready, timeout
+	p.mu.Unlock()
 }
 
 // NewPool builds a pool over store and launcher. licenseWS is the exit WS the
@@ -69,21 +90,46 @@ func (p *Pool) launch(ttl time.Duration) (access.KeyRecord, string, error) {
 // ready (no join latency); otherwise it cold-launches one.
 func (p *Pool) Issue(ttl time.Duration) (access.KeyRecord, string, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	// Warm path: a pre-joined exit is ready by construction.
 	if len(p.warmKeys) > 0 {
 		id := p.warmKeys[0]
 		p.warmKeys = p.warmKeys[1:]
 		if err := p.store.Claim(id, ttl, time.Now()); err == nil {
 			rec, _ := p.store.Get(id)
-			key, err := access.BuildKey(rec.CallLink, rec.Secret)
-			if err == nil {
+			if key, err := access.BuildKey(rec.CallLink, rec.Secret); err == nil {
+				p.mu.Unlock()
 				return rec, key, nil
 			}
 		}
 		// Claim/build failed: fall through to a cold launch.
 	}
-	return p.launch(ttl)
+	rec, key, err := p.launch(ttl)
+	ready, timeout := p.ready, p.readyTimeout
+	p.mu.Unlock()
+	if err != nil {
+		return access.KeyRecord{}, "", err
+	}
+	// Cold path: wait for the exit to join its call before handing out the
+	// key, so a buyer is never given a key whose exit is not up yet.
+	if ready != nil && !waitReady(rec.ID, ready, timeout) {
+		_ = p.Release(rec.ID)
+		return access.KeyRecord{}, "", ErrNotReady
+	}
+	return rec, key, nil
+}
+
+// waitReady polls ready(id) until it holds or timeout elapses.
+func waitReady(id string, ready func(string) bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if ready(id) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(readyPoll)
+	}
 }
 
 // Release stops the key's exit and revokes it, freeing its call link.

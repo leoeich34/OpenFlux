@@ -19,22 +19,56 @@ type Msg struct {
 // expiry. Short so mid-session expiry is enforced promptly.
 const expiryScanInterval = 200 * time.Millisecond
 
+// KeyLifecycle lets a higher layer (the pool orchestrator) own issue and
+// revoke so that issuing a key also launches its exit and revoking stops it.
+// When unset, the server issues/revokes against the store directly (Plan 1).
+type KeyLifecycle interface {
+	Issue(ttl time.Duration) (KeyRecord, string, error)
+	Release(id string) error
+}
+
 // Server is the control plane: an admin HTTP API and an exit WebSocket hub
 // over one Store.
 type Server struct {
 	store    *Store
 	upgrader websocket.Upgrader
 
-	mu      sync.Mutex
-	revoked map[string]chan struct{} // id -> closed when revoked
+	mu        sync.Mutex
+	revoked   map[string]chan struct{} // id -> closed when revoked
+	connected map[string]int           // id -> live exit WS count
+	lifecycle KeyLifecycle
 }
 
 // NewServer builds a control server over s.
 func NewServer(s *Store) *Server {
 	return &Server{
-		store:   s,
-		revoked: map[string]chan struct{}{},
+		store:     s,
+		revoked:   map[string]chan struct{}{},
+		connected: map[string]int{},
 	}
+}
+
+// SetLifecycle routes /admin/issue and /admin/revoke through l.
+func (srv *Server) SetLifecycle(l KeyLifecycle) {
+	srv.mu.Lock()
+	srv.lifecycle = l
+	srv.mu.Unlock()
+}
+
+// Connected reports whether an exit for id currently holds the WebSocket.
+func (srv *Server) Connected(id string) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.connected[id] > 0
+}
+
+func (srv *Server) markConnected(id string, delta int) {
+	srv.mu.Lock()
+	srv.connected[id] += delta
+	if srv.connected[id] <= 0 {
+		delete(srv.connected, id)
+	}
+	srv.mu.Unlock()
 }
 
 // revokeChan returns (creating if needed) the broadcast channel for id.
@@ -80,16 +114,29 @@ func (srv *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds int `json:"ttlSeconds"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	rec, err := srv.store.Issue(time.Duration(req.TTLSeconds)*time.Second, time.Now())
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+
+	srv.mu.Lock()
+	lc := srv.lifecycle
+	srv.mu.Unlock()
+
+	var (
+		rec KeyRecord
+		key string
+		err error
+	)
+	if lc != nil {
+		rec, key, err = lc.Issue(ttl)
+	} else {
+		rec, err = srv.store.Issue(ttl, time.Now())
+		if err == nil {
+			key, err = BuildKey(rec.CallLink, rec.Secret)
+		}
+	}
 	if err == ErrPoolExhausted {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	key, err := BuildKey(rec.CallLink, rec.Secret)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -107,7 +154,18 @@ func (srv *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	switch err := srv.store.Revoke(req.ID); err {
+
+	srv.mu.Lock()
+	lc := srv.lifecycle
+	srv.mu.Unlock()
+
+	var err error
+	if lc != nil {
+		err = lc.Release(req.ID)
+	} else {
+		err = srv.store.Revoke(req.ID)
+	}
+	switch err {
 	case nil:
 		srv.signalRevoke(req.ID)
 		writeJSON(w, map[string]string{"status": "revoked"})
@@ -173,6 +231,9 @@ func (srv *Server) handleExitWS(w http.ResponseWriter, r *http.Request) {
 		sendRevoke()
 		return
 	}
+
+	srv.markConnected(id, 1)
+	defer srv.markConnected(id, -1)
 
 	revoked := srv.revokeChan(id)
 
