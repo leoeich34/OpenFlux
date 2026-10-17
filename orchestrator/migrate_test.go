@@ -88,3 +88,26 @@ func TestControllerMigratesInOrder(t *testing.T) {
 		t.Errorf("second Step migrated within min interval")
 	}
 }
+
+func TestStallFromCountsOnlyAfterFirstByte(t *testing.T) {
+	var lastBytes uint64
+	var lastAdvance time.Time
+	var seen bool
+	t0 := time.Now()
+	// No bytes yet, long wait -> still 0 (idle, not dead)
+	if d := stallFrom(0, t0.Add(time.Hour), &lastBytes, &lastAdvance, &seen); d != 0 {
+		t.Errorf("pre-traffic stall = %v, want 0", d)
+	}
+	// First byte arrives -> 0, clock starts
+	if d := stallFrom(100, t0.Add(time.Hour), &lastBytes, &lastAdvance, &seen); d != 0 {
+		t.Errorf("first-byte stall = %v, want 0", d)
+	}
+	// No progress for 30s -> stall ~30s
+	if d := stallFrom(100, t0.Add(time.Hour+30*time.Second), &lastBytes, &lastAdvance, &seen); d < 29*time.Second {
+		t.Errorf("stall after idle = %v, want ~30s", d)
+	}
+	// More bytes -> resets to 0
+	if d := stallFrom(200, t0.Add(time.Hour+40*time.Second), &lastBytes, &lastAdvance, &seen); d != 0 {
+		t.Errorf("stall after new bytes = %v, want 0", d)
+	}
+}

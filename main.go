@@ -1185,7 +1185,7 @@ DEPRECATED (removed in v2)
 			}
 			log.Printf("Access control: enforcing key %s via %s", *licenseKeyID, *licenseServer)
 			if *migrateCalls && managerInst != nil && len(specs) > 0 {
-				deps := orchestrator.NewManagerMigrateDeps(*licenseKeyID, managerInst, *licenseServer)
+				deps := orchestrator.NewManagerMigrateDeps(*licenseKeyID, string(secret), managerInst, *licenseServer)
 				ctrl := orchestrator.NewMigrationController(*licenseKeyID, deps, time.Now())
 				ctrl.SetCurrentName(specs[0].Name)
 				go orchestrator.RunMigrationLoop(ctrl, 5*time.Second, make(chan struct{}))

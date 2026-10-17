@@ -1,6 +1,9 @@
 package access
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -8,6 +11,16 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+// ProofFor returns the proof a holder of a key's secret presents to the exit
+// hub's mutating endpoints for id: hex(HMAC-SHA256(secret, id)). The secret
+// never travels; an attacker who knows only the (non-secret) key id cannot
+// forge it.
+func ProofFor(secret, id string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(id))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // Msg is the JSON message exchanged on the exit WebSocket, in both
 // directions. Type is "heartbeat" (exit → server) or "revoke" (server → exit).
@@ -218,9 +231,29 @@ func (srv *Server) ExitHandler() http.Handler {
 	return mux
 }
 
+// checkProof returns true when the request carries a valid per-key proof for
+// id. It also writes the appropriate error (404 unknown id, 403 bad proof).
+func (srv *Server) checkProof(w http.ResponseWriter, r *http.Request, id string) bool {
+	rec, ok := srv.store.Get(id)
+	if !ok {
+		http.Error(w, ErrNotFound.Error(), http.StatusNotFound)
+		return false
+	}
+	want := ProofFor(rec.Secret, id)
+	got := r.Header.Get("X-OpenFlux-Proof")
+	if !hmac.Equal([]byte(got), []byte(want)) {
+		http.Error(w, "invalid proof", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // handleNextCall reserves a fresh pool call link for the key's migration.
 func (srv *Server) handleNextCall(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	if !srv.checkProof(w, r, id) {
+		return
+	}
 	link, err := srv.store.ReserveNextCall(id, time.Now())
 	switch err {
 	case nil:
@@ -237,6 +270,9 @@ func (srv *Server) handleNextCall(w http.ResponseWriter, r *http.Request) {
 // handleCommitCall promotes the reserved migration target to the current call.
 func (srv *Server) handleCommitCall(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	if !srv.checkProof(w, r, id) {
+		return
+	}
 	switch err := srv.store.CommitNextCall(id); err {
 	case nil:
 		writeJSON(w, map[string]string{"status": "committed"})
