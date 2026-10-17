@@ -213,7 +213,38 @@ func (srv *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (srv *Server) ExitHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/exit/ws", srv.handleExitWS)
+	mux.HandleFunc("/exit/nextcall", srv.handleNextCall)
+	mux.HandleFunc("/exit/commitcall", srv.handleCommitCall)
 	return mux
+}
+
+// handleNextCall reserves a fresh pool call link for the key's migration.
+func (srv *Server) handleNextCall(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	link, err := srv.store.ReserveNextCall(id, time.Now())
+	switch err {
+	case nil:
+		writeJSON(w, map[string]string{"callLink": link})
+	case ErrNotFound:
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case ErrPoolExhausted:
+		http.Error(w, err.Error(), http.StatusConflict)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handleCommitCall promotes the reserved migration target to the current call.
+func (srv *Server) handleCommitCall(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	switch err := srv.store.CommitNextCall(id); err {
+	case nil:
+		writeJSON(w, map[string]string{"status": "committed"})
+	case ErrNotFound:
+		http.Error(w, err.Error(), http.StatusNotFound)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (srv *Server) handleExitWS(w http.ResponseWriter, r *http.Request) {

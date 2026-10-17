@@ -208,3 +208,46 @@ func TestServerConnectedTracksExitWS(t *testing.T) {
 		t.Errorf("Connected true after close")
 	}
 }
+
+func TestExitNextCallReservesAndCommits(t *testing.T) {
+	_, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1", "https://telemost.yandex.ru/j/2"})
+	out := adminIssue(t, admin, 3600)
+	id := out["id"].(string)
+
+	resp, err := http.Get(exit.URL + "/exit/nextcall?id=" + id)
+	if err != nil {
+		t.Fatalf("nextcall: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("nextcall status %d", resp.StatusCode)
+	}
+	var nc map[string]string
+	json.NewDecoder(resp.Body).Decode(&nc)
+	if nc["callLink"] == "" || nc["callLink"] == out["callLink"] {
+		t.Errorf("nextcall gave %q (current %q)", nc["callLink"], out["callLink"])
+	}
+
+	cresp, err := http.Post(exit.URL+"/exit/commitcall?id="+id, "", nil)
+	if err != nil {
+		t.Fatalf("commitcall: %v", err)
+	}
+	cresp.Body.Close()
+	if cresp.StatusCode != 200 {
+		t.Errorf("commitcall status %d", cresp.StatusCode)
+	}
+}
+
+func TestExitNextCallExhaustedIs409(t *testing.T) {
+	_, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"}) // only one link
+	out := adminIssue(t, admin, 3600)
+	id := out["id"].(string)
+	resp, err := http.Get(exit.URL + "/exit/nextcall?id=" + id)
+	if err != nil {
+		t.Fatalf("nextcall: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 409 {
+		t.Errorf("status = %d, want 409", resp.StatusCode)
+	}
+}

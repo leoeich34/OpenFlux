@@ -37,6 +37,9 @@ type KeyRecord struct {
 	Status    Status    `json:"status"`
 	IssuedAt  time.Time `json:"issuedAt"`
 	ExpiresAt time.Time `json:"expiresAt"`
+	// NextCallLink is a pool link reserved for an in-progress call migration;
+	// it is held (not reissued to anyone else) until the migration commits.
+	NextCallLink string `json:"nextCallLink,omitempty"`
 }
 
 // Valid reports whether the key may carry traffic at time now.
@@ -80,6 +83,9 @@ func (s *Store) assignedLinks(now time.Time) map[string]bool {
 	for _, r := range s.keys {
 		if r.Valid(now) {
 			used[r.CallLink] = true
+			if r.NextCallLink != "" {
+				used[r.NextCallLink] = true
+			}
 		}
 	}
 	return used
@@ -160,6 +166,47 @@ func (s *Store) Claim(id string, ttl time.Duration, now time.Time) error {
 	r.ExpiresAt = now.Add(ttl)
 	s.keys[id] = r
 	return s.persist()
+}
+
+// ReserveNextCall reserves a free pool link as the key's migration target and
+// returns it. The link is held (counted as assigned) until CommitNextCall or
+// the key is released. ErrNotFound for an unknown id, ErrPoolExhausted when no
+// link is free.
+func (s *Store) ReserveNextCall(id string, now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return "", ErrNotFound
+	}
+	link := s.freeLink(now)
+	if link == "" {
+		return "", ErrPoolExhausted
+	}
+	r.NextCallLink = link
+	s.keys[id] = r
+	if err := s.persist(); err != nil {
+		return "", err
+	}
+	return link, nil
+}
+
+// CommitNextCall promotes a reserved migration target to the key's current
+// call link, freeing the old one. A no-op (nil) when nothing is reserved.
+func (s *Store) CommitNextCall(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.keys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if r.NextCallLink != "" {
+		r.CallLink = r.NextCallLink
+		r.NextCallLink = ""
+		s.keys[id] = r
+		return s.persist()
+	}
+	return nil
 }
 
 // Extend moves a key's expiry out by d.
