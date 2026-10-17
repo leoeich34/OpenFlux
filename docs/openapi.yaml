@@ -1,0 +1,189 @@
+openapi: 3.0.3
+info:
+  title: OpenFlux Access-Key Service API
+  version: "1.0.0"
+  description: >
+    HTTP API of the OpenFlux access-key service (served by `accessd`).
+
+
+    Two surfaces: the **Admin API** (loopback only — the operator's control
+    plane, consumed by `accessctl` or a Telegram bot) and the **Exit hub**
+    migration endpoints (per-key HMAC-signed, used by exit nodes).
+
+
+    The exit control channel is a WebSocket (`GET /exit/ws`) and is not
+    expressible in OpenAPI; see `docs/api.md` for its JSON frame protocol and
+    for the `openflux://` key format.
+servers:
+  - url: http://127.0.0.1:8099
+    description: Admin API (loopback)
+  - url: http://127.0.0.1:8098
+    description: Exit hub (keep off the WAN)
+tags:
+  - name: admin
+    description: Operator control plane (loopback bind is the only auth)
+  - name: exit
+    description: Exit-node migration endpoints (per-key proof required)
+
+paths:
+  /admin/issue:
+    post:
+      tags: [admin]
+      summary: Issue a new access key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttlSeconds:
+                  type: integer
+                  description: Validity window from now, in seconds.
+                  example: 2592000
+      responses:
+        "200":
+          description: The issued key.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, example: "K5B2QX9P3A" }
+                  key:
+                    type: string
+                    description: openflux:// key — contains the secret, treat as a credential.
+                    example: "openflux://v1/eJx..."
+                  callLink: { type: string, format: uri }
+                  expiresAt: { type: string, format: date-time }
+        "409": { description: Call pool exhausted (no free link / warm exit). }
+        "500": { description: Store or launch failure. }
+  /admin/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke a key immediately (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+              required: [id]
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "revoked" }
+        "404": { description: Unknown id. }
+        "500": { description: Store failure. }
+  /admin/extend:
+    post:
+      tags: [admin]
+      summary: Move a key's expiry out
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string }
+                ttlSeconds: { type: integer, description: Seconds to add. }
+              required: [id, ttlSeconds]
+      responses:
+        "200":
+          description: Extended.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "extended" }
+        "404": { description: Unknown id. }
+        "500": { description: Store failure. }
+  /admin/list:
+    get:
+      tags: [admin]
+      summary: List all keys (never the secret)
+      responses:
+        "200":
+          description: All keys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    status: { type: string, enum: [active, revoked] }
+                    callLink: { type: string, format: uri }
+                    expiresAt: { type: string, format: date-time }
+
+  /exit/nextcall:
+    get:
+      tags: [exit]
+      summary: Reserve a fresh pool call link for a key's migration
+      security:
+        - keyProof: []
+      parameters:
+        - { in: query, name: id, required: true, schema: { type: string } }
+        - in: header
+          name: X-OpenFlux-Proof
+          required: true
+          schema: { type: string }
+          description: hex(HMAC-SHA256(secret, id)).
+      responses:
+        "200":
+          description: The reserved call link.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  callLink: { type: string, format: uri }
+        "403": { description: Missing or invalid proof. }
+        "404": { description: Unknown id. }
+        "409": { description: No free pool link. }
+  /exit/commitcall:
+    post:
+      tags: [exit]
+      summary: Promote the reserved call to current (free the old)
+      security:
+        - keyProof: []
+      parameters:
+        - { in: query, name: id, required: true, schema: { type: string } }
+        - in: header
+          name: X-OpenFlux-Proof
+          required: true
+          schema: { type: string }
+          description: hex(HMAC-SHA256(secret, id)).
+      responses:
+        "200":
+          description: Committed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "committed" }
+        "403": { description: Missing or invalid proof. }
+        "404": { description: Unknown id. }
+        "500": { description: Store failure. }
+
+components:
+  securitySchemes:
+    keyProof:
+      type: apiKey
+      in: header
+      name: X-OpenFlux-Proof
+      description: >
+        Per-key proof hex(HMAC-SHA256(secret, id)). The exit holds the key
+        secret as its channel key; a party that knows only the (non-secret)
+        id cannot forge it. The Admin API has no scheme — it is loopback-only.

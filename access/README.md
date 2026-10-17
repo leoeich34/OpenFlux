@@ -8,6 +8,11 @@ This package is subsystem 1 of 4 (control plane + exit enforcement + key
 issuance). The pool orchestrator, Telegram bot and client key-field are
 separate plans.
 
+**API reference:** [`docs/api.md`](../docs/api.md) documents every endpoint
+(inputs, outputs, formats, auth) and the WebSocket + `openflux://` key
+protocols; [`docs/openapi.yaml`](../docs/openapi.yaml) is the OpenAPI 3.0 spec
+for the HTTP endpoints (loads in Swagger UI).
+
 ## Pieces
 
 - `access` — key store, `openflux://` key builder, control server (admin API
