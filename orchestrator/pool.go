@@ -100,6 +100,12 @@ func (p *Pool) Issue(ttl time.Duration) (access.KeyRecord, string, error) {
 				p.mu.Unlock()
 				return rec, key, nil
 			}
+		} else {
+			// Claim failed but the warm key is still valid and its exit still
+			// running and joined. Return the id to the warm set so the handle
+			// is not orphaned (Reconcile won't reap a still-valid key); a later
+			// Issue can claim it. This buyer falls through to a cold launch.
+			p.warmKeys = append(p.warmKeys, id)
 		}
 		// Claim/build failed: fall through to a cold launch.
 	}
