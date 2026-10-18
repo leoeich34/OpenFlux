@@ -46,7 +46,7 @@ func TestOnStopFiresOnRevokeMessage(t *testing.T) {
 	defer closeSrv()
 
 	stop := make(chan string, 1)
-	lc, err := Dial(url, "id1", 500*time.Millisecond, func(reason string) { stop <- reason })
+	lc, err := Dial(url, "id1", "s1", 500*time.Millisecond, func(reason string) { stop <- reason })
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestOnStopFiresOnConnectionLoss(t *testing.T) {
 	closeSrv()
 
 	stop := make(chan string, 1)
-	lc, err := Dial(url, "id1", 500*time.Millisecond, func(reason string) { stop <- reason })
+	lc, err := Dial(url, "id1", "s1", 500*time.Millisecond, func(reason string) { stop <- reason })
 	if err != nil {
 		// Dial itself may fail because the server is down; that is a valid
 		// fail-closed outcome only if it is surfaced — the exit wiring treats
@@ -79,7 +79,7 @@ func TestCloseDoesNotFireOnStop(t *testing.T) {
 	defer closeSrv()
 
 	var fired atomic.Bool
-	lc, err := Dial(url, "id1", 500*time.Millisecond, func(string) { fired.Store(true) })
+	lc, err := Dial(url, "id1", "s1", 500*time.Millisecond, func(string) { fired.Store(true) })
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestOnStopFiresOnce(t *testing.T) {
 	defer closeSrv()
 
 	var count atomic.Int32
-	lc, err := Dial(url, "id1", 500*time.Millisecond, func(string) { count.Add(1) })
+	lc, err := Dial(url, "id1", "s1", 500*time.Millisecond, func(string) { count.Add(1) })
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

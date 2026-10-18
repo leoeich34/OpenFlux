@@ -30,8 +30,8 @@ func licenseValidate(server, keyID string) (bool, error) {
 // startLicense dials the control server for keyID. On revoke, expiry, or a
 // lost connection beyond the grace window it cleanly stops the transport and
 // exits (fail-closed) — the same clean leave the Telemost signal path uses.
-func startLicense(server, keyID string, trans transport.Transport) (*access.LicenseClient, error) {
-	return access.Dial(server, keyID, licenseGrace, func(reason string) {
+func startLicense(server, keyID, secret string, trans transport.Transport) (*access.LicenseClient, error) {
+	return access.Dial(server, keyID, secret, licenseGrace, func(reason string) {
 		log.Printf("Access key %s: %s — stopping", keyID, reason)
 		_ = trans.Stop()
 		os.Exit(0)

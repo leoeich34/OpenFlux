@@ -1,6 +1,7 @@
 package access
 
 import (
+	"net/http"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 type LicenseClient struct {
 	wsURL   string
 	keyID   string
+	secret  string // per-key secret, for the hub proof on the WS dial
 	grace   time.Duration
 	onStop  func(reason string)
 	once    sync.Once
@@ -27,12 +29,15 @@ type LicenseClient struct {
 }
 
 // Dial connects to wsURL (the exit WebSocket endpoint) for keyID and starts
-// enforcing. grace bounds how long a lost connection may stay down before
+// enforcing. secret is the per-key secret used to prove to the hub that this
+// node holds the key (the same proof the nextcall/commitcall endpoints
+// demand). grace bounds how long a lost connection may stay down before
 // onStop fires; heartbeats are sent every grace/2.
-func Dial(wsURL, keyID string, grace time.Duration, onStop func(reason string)) (*LicenseClient, error) {
+func Dial(wsURL, keyID, secret string, grace time.Duration, onStop func(reason string)) (*LicenseClient, error) {
 	lc := &LicenseClient{
 		wsURL:  wsURL,
 		keyID:  keyID,
+		secret: secret,
 		grace:  grace,
 		onStop: onStop,
 		done:   make(chan struct{}),
@@ -54,7 +59,9 @@ func (lc *LicenseClient) connect() (*websocket.Conn, error) {
 	q := u.Query()
 	q.Set("id", lc.keyID)
 	u.RawQuery = q.Encode()
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	h := http.Header{}
+	h.Set("X-OpenFlux-Proof", ProofFor(lc.secret, lc.keyID))
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	return c, err
 }
 

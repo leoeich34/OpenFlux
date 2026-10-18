@@ -44,10 +44,12 @@ func adminIssue(t *testing.T, admin *httptest.Server, ttlSeconds int) map[string
 	return out
 }
 
-func dialExit(t *testing.T, exit *httptest.Server, id string) *websocket.Conn {
+func dialExit(t *testing.T, exit *httptest.Server, id, secret string) *websocket.Conn {
 	t.Helper()
 	u := "ws" + strings.TrimPrefix(exit.URL, "http") + "/exit/ws?id=" + id
-	c, _, err := websocket.DefaultDialer.Dial(u, nil)
+	h := http.Header{}
+	h.Set("X-OpenFlux-Proof", ProofFor(secret, id))
+	c, _, err := websocket.DefaultDialer.Dial(u, h)
 	if err != nil {
 		t.Fatalf("ws dial: %v", err)
 	}
@@ -116,7 +118,7 @@ func TestExitWSGetsRevokeAfterAdminRevoke(t *testing.T) {
 	_, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
 	out := adminIssue(t, admin, 3600)
 	id := out["id"].(string)
-	c := dialExit(t, exit, id)
+	c := dialExit(t, exit, id, keySecret(t, out))
 
 	body, _ := json.Marshal(map[string]string{"id": id})
 	resp, err := http.Post(admin.URL+"/admin/revoke", "application/json", bytes.NewReader(body))
@@ -132,7 +134,7 @@ func TestExitWSRevokeOnConnectIfExpired(t *testing.T) {
 	_, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
 	out := adminIssue(t, admin, 0) // already expired
 	id := out["id"].(string)
-	c := dialExit(t, exit, id)
+	c := dialExit(t, exit, id, keySecret(t, out))
 	readRevoke(t, c, 3*time.Second)
 }
 
@@ -140,7 +142,7 @@ func TestExitWSRevokeOnMidSessionExpiry(t *testing.T) {
 	_, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
 	out := adminIssue(t, admin, 1) // valid for 1s
 	id := out["id"].(string)
-	c := dialExit(t, exit, id)
+	c := dialExit(t, exit, id, keySecret(t, out))
 	// stays connected; the key expires ~1s in and the server must push revoke
 	readRevoke(t, c, 4*time.Second)
 }
@@ -192,7 +194,7 @@ func TestServerConnectedTracksExitWS(t *testing.T) {
 	if srv.Connected(id) {
 		t.Errorf("Connected before dial")
 	}
-	c := dialExit(t, exit, id)
+	c := dialExit(t, exit, id, keySecret(t, out))
 	deadline := time.Now().Add(2 * time.Second)
 	for !srv.Connected(id) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -257,6 +259,61 @@ func TestExitNextCallExhaustedIs409(t *testing.T) {
 	if resp.StatusCode != 409 {
 		t.Errorf("status = %d, want 409", resp.StatusCode)
 	}
+}
+
+// TestExitWSRequiresProof guards the readiness gate: because the exit hub
+// binds on all interfaces, /exit/ws must demand the same per-key proof as the
+// other hub endpoints. Without it a spoofed WS would be counted in srv.connected
+// and could satisfy cold-launch readiness before the real exit joins.
+func TestExitWSRequiresProof(t *testing.T) {
+	srv, admin, exit := newTestServer(t, []string{"https://telemost.yandex.ru/j/1"})
+	out := adminIssue(t, admin, 3600)
+	id := out["id"].(string)
+	secret := keySecret(t, out)
+	wsURL := "ws" + strings.TrimPrefix(exit.URL, "http") + "/exit/ws?id=" + id
+
+	// No proof -> rejected, not counted.
+	if _, resp, err := websocket.DefaultDialer.Dial(wsURL, nil); err == nil {
+		t.Errorf("dial without proof succeeded, want rejection")
+	} else if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("no proof: status %v, want 403", respStatus(resp))
+	}
+
+	// Wrong proof -> rejected.
+	h := http.Header{}
+	h.Set("X-OpenFlux-Proof", "deadbeef")
+	if _, resp, err := websocket.DefaultDialer.Dial(wsURL, h); err == nil {
+		t.Errorf("dial with bad proof succeeded, want rejection")
+	} else if resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("bad proof: status %v, want 403", respStatus(resp))
+	}
+
+	if srv.Connected(id) {
+		t.Fatalf("spoofed WS was counted in connected set")
+	}
+
+	// Correct proof -> accepted and counted.
+	hok := http.Header{}
+	hok.Set("X-OpenFlux-Proof", ProofFor(secret, id))
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, hok)
+	if err != nil {
+		t.Fatalf("dial with correct proof failed: %v", err)
+	}
+	defer c.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !srv.Connected(id) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !srv.Connected(id) {
+		t.Fatalf("authenticated WS not counted in connected set")
+	}
+}
+
+func respStatus(resp *http.Response) int {
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }
 
 func keySecret(t *testing.T, out map[string]any) string {

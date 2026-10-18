@@ -285,6 +285,14 @@ func (srv *Server) handleCommitCall(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) handleExitWS(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	// Require the same per-key proof as the mutating hub endpoints. The hub
+	// binds on all interfaces, and a connected WS counts toward cold-launch
+	// readiness (srv.connected); without this a spoofed connection could
+	// satisfy readiness before the real exit joins. Checked before the upgrade
+	// so a forged dial is rejected with a plain 403/404.
+	if !srv.checkProof(w, r, id) {
+		return
+	}
 	c, err := srv.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return

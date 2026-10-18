@@ -1178,7 +1178,7 @@ DEPRECATED (removed in v2)
 		if enabled, err := licenseValidate(*licenseServer, *licenseKeyID); err != nil {
 			log.Fatalf("%v", err)
 		} else if enabled {
-			if _, err := startLicense(*licenseServer, *licenseKeyID, trans); err != nil {
+			if _, err := startLicense(*licenseServer, *licenseKeyID, string(secret), trans); err != nil {
 				// Fail-closed: if the exit cannot reach the control server at
 				// startup, it must not carry traffic.
 				log.Fatalf("Access control: cannot reach license server: %v", err)

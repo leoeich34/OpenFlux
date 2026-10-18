@@ -90,11 +90,17 @@ func (m *MigrationController) Step(now time.Time) (bool, error) {
 		// one is not fatal, it just lingers until reconnect.
 		_ = err
 	}
+	// The new transport is up and the old one is stopped, so it is now the
+	// current call regardless of what CommitCall does. Advance curName and
+	// lastMigrate before committing: a failed commit must not leave curName
+	// pointing at the already-stopped previous call (which would make the next
+	// Step stop that dead name again and leak this just-started transport) nor
+	// leave lastMigrate stale (which would defeat the anti-flap interval).
+	m.curName = name
+	m.lastMigrate = now
 	if err := m.deps.CommitCall(m.keyID); err != nil {
 		return true, fmt.Errorf("commit: %w", err)
 	}
-	m.curName = name
-	m.lastMigrate = now
 	return true, nil
 }
 

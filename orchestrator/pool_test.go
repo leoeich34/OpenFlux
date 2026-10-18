@@ -137,6 +137,57 @@ func TestColdIssueNotReadyRollsBack(t *testing.T) {
 	}
 }
 
+// TestWarmClaimFailureDoesNotLeakHandle guards the warm path: Issue pops a
+// warm id before calling Claim, so if Claim fails (e.g. a persist error on a
+// still-valid key) the popped id's already-running exit must not be dropped
+// from the pool's bookkeeping. Otherwise the handle is orphaned for warmTTL
+// (Reconcile won't reap a still-valid key) while Issue cold-launches a fresh
+// exit for the buyer.
+func TestWarmClaimFailureDoesNotLeakHandle(t *testing.T) {
+	p, f, _ := newPool(t, []string{"cold-link"}, 0)
+	// A warm exit is running and tracked, but its Claim will fail: the id is
+	// absent from the store, standing in for any Claim error on an otherwise
+	// valid warm key.
+	h, err := f.Launch(ExitSpec{KeyID: "ghost"})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	p.mu.Lock()
+	p.handles["ghost"] = h
+	p.warmKeys = []string{"ghost"}
+	p.mu.Unlock()
+
+	// Issue: the warm Claim fails and it falls through to a cold launch, which
+	// must still succeed off the free pool link.
+	if _, _, err := p.Issue(time.Hour); err != nil {
+		t.Fatalf("Issue (cold fallback): %v", err)
+	}
+
+	p.mu.Lock()
+	tracked := false
+	for _, id := range p.warmKeys {
+		if id == "ghost" {
+			tracked = true
+		}
+	}
+	_, hasHandle := p.handles["ghost"]
+	p.mu.Unlock()
+
+	stopped := false
+	for _, s := range f.Stopped() {
+		if s.ID == h.ID {
+			stopped = true
+		}
+	}
+
+	// The running exit must not be orphaned: either kept in the warm set (so
+	// Release/Reconcile can still reach it) or stopped. The bug leaves it in
+	// p.handles but out of warmKeys and never stopped.
+	if hasHandle && !tracked && !stopped {
+		t.Errorf("warm Claim failure leaked the handle: present in p.handles but dropped from warmKeys and never stopped")
+	}
+}
+
 func TestAdoptRunningRepopulatesHandlesAndWarm(t *testing.T) {
 	now := time.Now()
 	p, f, st := newPool(t, []string{"a", "b", "c"}, 1)

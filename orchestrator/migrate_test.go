@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -34,12 +35,13 @@ func TestShouldMigrate(t *testing.T) {
 }
 
 type fakeMigrateDeps struct {
-	stall    time.Duration
-	loss     float64
-	next     string
-	nextErr  error
-	started  []string // "name url"
-	stopped  []string
+	stall     time.Duration
+	loss      float64
+	next      string
+	nextErr   error
+	commitErr error
+	started   []string // "name url"
+	stopped   []string
 	committed int
 }
 
@@ -50,7 +52,7 @@ func (f *fakeMigrateDeps) StartCall(name, url string) error {
 	return nil
 }
 func (f *fakeMigrateDeps) StopCall(name string) error { f.stopped = append(f.stopped, name); return nil }
-func (f *fakeMigrateDeps) CommitCall(string) error    { f.committed++; return nil }
+func (f *fakeMigrateDeps) CommitCall(string) error    { f.committed++; return f.commitErr }
 
 func TestControllerHealthyDoesNothing(t *testing.T) {
 	d := &fakeMigrateDeps{stall: 0, loss: 0.01}
@@ -86,6 +88,51 @@ func TestControllerMigratesInOrder(t *testing.T) {
 	did2, _ := m.Step(time.Now())
 	if did2 {
 		t.Errorf("second Step migrated within min interval")
+	}
+}
+
+// TestControllerCommitFailureStillAdvances guards against a leak: once the new
+// call is up and the old one is stopped, the controller must treat the new
+// call as current even if CommitCall fails. Otherwise curName still names the
+// already-stopped previous call and lastMigrate is stale, so the next Step
+// fires immediately, stops the old (already-stopped) name again, and leaks the
+// just-started transport.
+func TestControllerCommitFailureStillAdvances(t *testing.T) {
+	d := &fakeMigrateDeps{
+		stall:     10 * time.Second,
+		next:      "https://telemost.yandex.ru/j/new",
+		commitErr: errors.New("commit boom"),
+	}
+	m := NewMigrationController("K1", d, time.Now().Add(-time.Hour))
+	m.SetCurrentName("telemost-boot")
+
+	did, err := m.Step(time.Now())
+	if !did {
+		t.Fatalf("Step did = false, want true (migration happened)")
+	}
+	if err == nil {
+		t.Fatalf("Step err = nil, want the commit error surfaced")
+	}
+	// The new call is now carrying traffic: it must be current.
+	if m.curName != "telemost-migrated-1" {
+		t.Errorf("curName = %q, want telemost-migrated-1", m.curName)
+	}
+	// The old transport was torn down exactly once.
+	if len(d.stopped) != 1 || d.stopped[0] != "telemost-boot" {
+		t.Errorf("stopped = %v, want [telemost-boot]", d.stopped)
+	}
+	// Anti-flap must hold: an immediate second Step must not re-migrate
+	// (lastMigrate advanced), which would start telemost-migrated-2 and leak
+	// telemost-migrated-1.
+	did2, _ := m.Step(time.Now())
+	if did2 {
+		t.Errorf("second Step migrated within min interval after failed commit")
+	}
+	if len(d.started) != 1 {
+		t.Errorf("started = %v, want exactly one transport brought up", d.started)
+	}
+	if len(d.stopped) != 1 {
+		t.Errorf("stopped = %v, want the old transport torn down exactly once", d.stopped)
 	}
 }
 
