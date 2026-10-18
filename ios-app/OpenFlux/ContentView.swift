@@ -8,6 +8,7 @@ struct ContentView: View {
     @AppStorage("docURL") private var docURL: String = ""
     @AppStorage("maxToken") private var maxToken: String = ""
     @AppStorage("maxUid") private var maxUid: String = ""
+    @AppStorage("accessKey") private var accessKey: String = ""
     // Uncommon default port to avoid clashing with other local proxies.
     @AppStorage("socksPort") private var socksPort: String = "10808"
     @AppStorage("debugLog") private var debugLog: Bool = false
@@ -20,9 +21,32 @@ struct ContentView: View {
     private var canStart: Bool {
         guard (Int(socksPort) ?? 0) > 0 else { return false }
         switch transport {
-        case .yandex: return !docURL.trimmingCharacters(in: .whitespaces).isEmpty
-        case .max:    return !maxToken.isEmpty && !maxUid.isEmpty
+        case .yandex:    return !docURL.trimmingCharacters(in: .whitespaces).isEmpty
+        case .max:       return !maxToken.isEmpty && !maxUid.isEmpty
+        case .accessKey: return accessKeyCheck.ok
         }
+    }
+
+    /// Validates the pasted access key with the core (OpenFluxShareDecode),
+    /// so the app and the core agree on what a valid key is. Returns whether
+    /// it is connectable and, when not, a worded reason to show (nil while the
+    /// field is still empty — nothing to complain about yet). The key is a
+    /// credential: it is never logged here.
+    private var accessKeyCheck: (ok: Bool, message: String?) {
+        let trimmed = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return (false, nil) }
+        guard let c = trimmed.withCString({ OpenFluxShareDecode(UnsafeMutablePointer(mutating: $0)) }) else {
+            return (false, "Could not read the key.")
+        }
+        let json = String(cString: c)
+        OpenFluxFreeString(c)
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (false, "Could not read the key.")
+        }
+        if obj["config"] != nil { return (true, nil) }
+        if let err = obj["error"] as? String { return (false, err) }
+        return (false, "Invalid key.")
     }
 
     var body: some View {
@@ -76,6 +100,27 @@ struct ContentView: View {
             field(title: "MAX token", placeholder: "auth token", text: $maxToken)
             field(title: "MAX user ID", placeholder: "numeric id", text: $maxUid,
                   keyboard: .numberPad)
+        case .accessKey:
+            accessKeyField
+        }
+    }
+
+    private var accessKeyField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Access key").font(.caption).foregroundColor(.secondary)
+            TextEditor(text: $accessKey)
+                .font(.system(.footnote, design: .monospaced))
+                .frame(height: 90)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .disabled(tunnel.running)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(.systemGray4)))
+            if let msg = accessKeyCheck.message {
+                Text(msg).font(.caption2).foregroundColor(.red)
+            } else {
+                Text("Paste the openflux:// key you were given, then Start.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
         }
     }
 
@@ -103,7 +148,8 @@ struct ContentView: View {
                                      url: docURL,
                                      maxToken: maxToken,
                                      maxUid: maxUid,
-                                     port: Int(socksPort) ?? 10808)
+                                     port: Int(socksPort) ?? 10808,
+                                     accessKey: accessKey)
                     } label: {
                         Label("Start", systemImage: "play.fill").frame(maxWidth: .infinity)
                     }
@@ -136,6 +182,9 @@ struct ContentView: View {
                     Label("Stop VPN", systemImage: "bolt.slash.fill").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+            } else if transport == .accessKey {
+                Text("An access key connects through the local SOCKS5 proxy above. Whole-device VPN from a key is not available yet.")
+                    .font(.caption2).foregroundColor(.secondary)
             } else {
                 Button {
                     vpn.start(transport: transport.rawValue, url: docURL,
@@ -146,8 +195,10 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canStart)
             }
-            Text("Routes the whole device through the exit node (TCP + DNS-over-TCP).")
-                .font(.caption2).foregroundColor(.secondary)
+            if transport != .accessKey {
+                Text("Routes the whole device through the exit node (TCP + DNS-over-TCP).")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
         }
     }
 

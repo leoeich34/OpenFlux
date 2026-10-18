@@ -4,11 +4,13 @@ import Combine
 enum TransportKind: String, CaseIterable, Identifiable {
     case yandex = "yandex"
     case max = "oneme"
+    case accessKey = "accesskey"
     var id: String { rawValue }
     var title: String {
         switch self {
         case .yandex: return "Yandex Docs"
         case .max: return "MAX"
+        case .accessKey: return "Access key"
         }
     }
 }
@@ -28,23 +30,38 @@ final class TunnelController: ObservableObject {
 
     /// Starts the client tunnel over the selected transport.
     /// - port: local SOCKS5 port to listen on (127.0.0.1:port).
-    func start(transport: TransportKind, url: String, maxToken: String, maxUid: String, port: Int) {
+    /// - accessKey: the pasted openflux:// key, used only when transport is
+    ///   `.accessKey` (the core decodes it and connects over the Session path).
+    func start(transport: TransportKind, url: String, maxToken: String, maxUid: String, port: Int, accessKey: String = "") {
         guard !running else { return }
         let addr = "127.0.0.1:\(port)"
         socksAddr = addr
 
-        let rc = transport.rawValue.withCString { tt in
-            url.withCString { u in
+        let rc: Int32
+        if transport == .accessKey {
+            let key = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            rc = key.withCString { k in
                 addr.withCString { a in
-                    maxToken.withCString { tok in
-                        maxUid.withCString { uid in
-                            OpenFluxStartClient(
-                                UnsafeMutablePointer(mutating: tt),
-                                UnsafeMutablePointer(mutating: u),
-                                UnsafeMutablePointer(mutating: a),
-                                UnsafeMutablePointer(mutating: tok),
-                                UnsafeMutablePointer(mutating: uid)
-                            )
+                    OpenFluxStartFromKey(
+                        UnsafeMutablePointer(mutating: k),
+                        UnsafeMutablePointer(mutating: a)
+                    )
+                }
+            }
+        } else {
+            rc = transport.rawValue.withCString { tt in
+                url.withCString { u in
+                    addr.withCString { a in
+                        maxToken.withCString { tok in
+                            maxUid.withCString { uid in
+                                OpenFluxStartClient(
+                                    UnsafeMutablePointer(mutating: tt),
+                                    UnsafeMutablePointer(mutating: u),
+                                    UnsafeMutablePointer(mutating: a),
+                                    UnsafeMutablePointer(mutating: tok),
+                                    UnsafeMutablePointer(mutating: uid)
+                                )
+                            }
                         }
                     }
                 }
@@ -62,6 +79,8 @@ final class TunnelController: ObservableObject {
             appendLog("[app] transport failed to start")
         case 4:
             appendLog("[app] port \(port) is busy — pick another port")
+        case 7:
+            appendLog("[app] invalid access key — check the key you pasted")
         default:
             appendLog("[app] start failed (code \(rc))")
         }
