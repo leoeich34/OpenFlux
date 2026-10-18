@@ -70,10 +70,40 @@ func OpenFluxStartClient(transportType, url, socksAddr, maxToken, maxUid *C.char
 //export OpenFluxStartSession
 func OpenFluxStartSession(specsJSON, secret, socksAddr *C.char) (rc C.int) {
 	defer recoverStart(&rc, "OpenFluxStartSession")
+	return startSession(C.GoString(specsJSON), strings.TrimSpace(C.GoString(secret)), C.GoString(socksAddr))
+}
+
+// OpenFluxStartFromKey starts the SOCKS5 client from a pasted openflux://
+// access key: the core decodes the key into the same Session profile and
+// secret the manual Session path takes (mobile.KeySpecs) and connects over
+// it. A one-carrier key works too (the Session speaks classic to a classic
+// node). Returns the same start codes as OpenFluxStartSession, plus
+// startBadKey for a key that does not decode. The key and its secret are a
+// credential and are never logged.
+//
+//export OpenFluxStartFromKey
+func OpenFluxStartFromKey(link, socksAddr *C.char) (rc C.int) {
+	defer recoverStart(&rc, "OpenFluxStartFromKey")
 	if mobile.ProxyIsRunning() {
 		return startAlreadyRunning
 	}
-	msg := mobile.StartSessionProxy(C.GoString(specsJSON), strings.TrimSpace(C.GoString(secret)), C.GoString(socksAddr), "", "", "")
+	specsJSON, secret, err := mobile.KeySpecs(C.GoString(link))
+	if err != nil {
+		log.Printf("[BRIDGE] access key rejected")
+		return startBadKey
+	}
+	return startSession(specsJSON, secret, C.GoString(socksAddr))
+}
+
+// startSession is the shared Session connect path behind both
+// OpenFluxStartSession and OpenFluxStartFromKey: refuse a second start,
+// hand the profile to package mobile, and map its result to a start code.
+// It logs neither the specs nor the secret.
+func startSession(specsJSON, secret, socksAddr string) C.int {
+	if mobile.ProxyIsRunning() {
+		return startAlreadyRunning
+	}
+	msg := mobile.StartSessionProxy(specsJSON, strings.TrimSpace(secret), socksAddr, "", "", "")
 	if msg != "" {
 		log.Printf("[BRIDGE] start: %s", msg)
 		return startCode(msg)

@@ -242,6 +242,7 @@ const (
 	startAddrInUse      = 4
 	startPanic          = 5
 	startBadEncryption  = 6
+	startBadKey         = 7
 )
 
 var settings struct {
